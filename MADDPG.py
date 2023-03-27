@@ -29,33 +29,36 @@ class MADDPG:
     """A MADDPG(Multi Agent Deep Deterministic Policy Gradient) agent"""
 
     def __init__(self, dim_info, capacity, batch_size, actor_lr, critic_lr, res_dir):
-        # sum all the dims of each agent to get input dim for critic
-        global_obs_act_dim = sum(sum(val) for val in dim_info.values())
-        # create Agent(actor-critic) and replay buffer for each agent
+        
         self.agents = {}
         self.buffers = {}
-        for agent_id, (obs_dim, act_dim) in dim_info.items():
-            self.agents[agent_id] = Agent(obs_dim, act_dim, global_obs_act_dim, actor_lr, critic_lr)
-            self.buffers[agent_id] = Buffer(capacity, obs_dim, act_dim, 'cpu')
-        self.dim_info = dim_info
+        for i in dim_info['agent_class_name_list']:
+            self.agents[i] = Agent(dim_info['self_obs_dim'], dim_info['action_dim'], dim_info['global_obs_act_dim'], actor_lr, critic_lr)
+            self.buffers[i] = Buffer(capacity, dim_info['self_obs_dim'], dim_info['action_dim'], 'cpu')
 
+        self.dim_info = dim_info
         self.batch_size = batch_size
         self.res_dir = res_dir  # directory to save the training result
-        self.logger = setup_logger(os.path.join(res_dir, 'maddpg.log'))
+        self.logger = setup_logger(os.path.join(res_dir, 'maddpg.log')) 
 
     def add(self, obs, action, reward, next_obs, done):
         # NOTE that the experience is a dict with agent name as its key
-        for agent_id in obs.keys():
-            o = obs[agent_id]
-            a = action[agent_id]
-            if isinstance(a, int):
-                # the action from env.action_space.sample() is int, we have to convert it to onehot
-                a = np.eye(self.dim_info[agent_id][1])[a]
-
-            r = reward[agent_id]
-            next_o = next_obs[agent_id]
-            d = done[agent_id]
-            self.buffers[agent_id].add(o, a, r, next_o, d)
+        for agent_class in obs.keys():
+            o = obs[agent_class]
+            a = action[agent_class]
+            n = next_obs[agent_class]
+            # if isinstance(a, int):
+            #     # the action from env.action_space.sample() is int, we have to convert it to onehot
+            #     a = np.eye(self.dim_info[agent_id][1])[a]
+            flag = 0
+            for agent_pos in a.keys():
+                act = a[agent_pos][0]
+                ob = o[flag]
+                r = reward
+                next_o = n[flag]
+                d = done
+                self.buffers[agent_class].add(ob, act, r, next_o, d)
+                flag +=1
 
     def sample(self, batch_size):
         """sample experience from all the agents' buffers, and collect data for network input"""
@@ -80,12 +83,23 @@ class MADDPG:
 
     def select_action(self, obs):
         actions = {}
-        for agent, o in obs.items():
-            o = torch.from_numpy(o).unsqueeze(0).float()
-            a = self.agents[agent].action(o)  # torch.Size([1, action_size])
-            # NOTE that the output is a tensor, convert it to int before input to the environment
-            actions[agent] = a.squeeze(0).argmax().item()
-            self.logger.info(f'{agent} action: {actions[agent]}')
+        for agent_class, agents_info in obs.items():
+            actions[agent_class] = {}
+            for o in agents_info:
+                pos = o[-2]*16 + o[-1]
+                pos_x = o[-2]
+                pos_y = o[-1]
+                o = torch.from_numpy(o).unsqueeze(0).float()
+                a = self.agents[agent_class].action(o)
+                actions[agent_class][pos] = a
+                self.logger.info(f'class:{agent_class}, pos-x:{pos_x}, pos-y:{pos_y}, action: {a}')
+        
+        # for agent, o in obs.items():
+        #     o = torch.from_numpy(o).unsqueeze(0).float()
+        #     a = self.agents[agent].action(o)  # torch.Size([1, action_size])
+        #     # NOTE that the output is a tensor, convert it to int before input to the environment
+        #     actions[agent] = a.squeeze(0).argmax().item()
+        #     self.logger.info(f'{agent} action: {actions[agent]}')
         return actions
 
     def learn(self, batch_size, gamma):
@@ -121,14 +135,14 @@ class MADDPG:
             soft_update(agent.actor, agent.target_actor)
             soft_update(agent.critic, agent.target_critic)
 
-    def save(self, reward):
+    def save(self):
         """save actor parameters of all agents and training reward to `res_dir`"""
         torch.save(
             {name: agent.actor.state_dict() for name, agent in self.agents.items()},  # actor parameter
             os.path.join(self.res_dir, 'model.pt')
         )
-        with open(os.path.join(self.res_dir, 'rewards.pkl'), 'wb') as f:  # save training data
-            pickle.dump({'rewards': reward}, f)
+        # with open(os.path.join(self.res_dir, 'rewards.pkl'), 'wb') as f:  # save training data
+        #     pickle.dump({'rewards': reward}, f)
 
     @classmethod
     def load(cls, dim_info, file):
